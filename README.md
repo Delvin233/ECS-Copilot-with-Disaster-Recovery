@@ -31,6 +31,8 @@ A PHP visit counter application deployed on **Amazon ECS Fargate** using **AWS C
 - **CloudWatch Alarms**: Triggers DR automation on primary region failure
 - **SNS**: Notification system for DR events
 
+![Architecture Diagram](ecs_arch_diagram.png)
+
 ---
 
 ## 🚀 Deployment Guide
@@ -111,18 +113,18 @@ def lambda_handler(event, context):
     rds = boto3.client('rds', region_name='<dr-region>')
     ssm = boto3.client('ssm', region_name='<dr-region>')
     ecs = boto3.client('ecs', region_name='<dr-region>')
-    
+
     # Promote read replica
     rds.promote_read_replica(DBInstanceIdentifier='<replica-id>')
-    
+
     # Wait for promotion to complete
     waiter = rds.get_waiter('db_instance_available')
     waiter.wait(DBInstanceIdentifier='<replica-id>')
-    
+
     # Get new endpoint
     response = rds.describe_db_instances(DBInstanceIdentifier='<replica-id>')
     new_endpoint = response['DBInstances'][0]['Endpoint']['Address']
-    
+
     # Update Parameter Store
     ssm.put_parameter(
         Name='/copilot/<service-name>/dr/secrets/DB_HOST',
@@ -130,14 +132,14 @@ def lambda_handler(event, context):
         Overwrite=True,
         Type='String'
     )
-    
+
     # Scale ECS service
     ecs.update_service(
         cluster='<cluster-name>',
         service='<service-name>',
         desiredCount=1
     )
-    
+
     return {
         'statusCode': 200,
         'body': json.dumps('DR activation completed')
@@ -189,6 +191,7 @@ def lambda_handler(event, context):
 ### Manual DR Test
 
 1. **Simulate primary region failure**:
+
    ```bash
    # Stop RDS instance in primary region
    aws rds stop-db-instance --db-instance-identifier <primary-db-id>
@@ -197,6 +200,7 @@ def lambda_handler(event, context):
 2. **Monitor CloudWatch alarms** and Lambda execution
 
 3. **Verify DR activation**:
+
    ```bash
    # Check ECS service in DR region
    copilot svc show --name <service-name> --env dr
@@ -215,7 +219,7 @@ def lambda_handler(event, context):
 ## 📊 Monitoring and Observability
 
 - **CloudWatch Metrics**: ECS task health, RDS performance
-- **CloudWatch Logs**: Application logs and Lambda execution logs  
+- **CloudWatch Logs**: Application logs and Lambda execution logs
 - **CloudWatch Alarms**: Database connectivity, high latency, error rates
 - **AWS X-Ray**: Distributed tracing (optional)
 

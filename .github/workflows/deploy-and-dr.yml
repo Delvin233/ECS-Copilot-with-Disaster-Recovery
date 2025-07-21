@@ -2,7 +2,7 @@ name: Deploy and Disaster Recovery
 
 on:
   push:
-    branches: [main, feature/devops]
+    branches: [main, feature/cicd]
   workflow_dispatch:
     inputs:
       force_dr:

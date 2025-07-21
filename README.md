@@ -8,8 +8,9 @@ A PHP visit counter application deployed on **Amazon ECS Fargate** using **AWS C
 - ✅ Docker containerization (`Dockerfile.app`)
 - ✅ ECS deployment with AWS Copilot
 - ✅ SSM Parameter Store integration for secrets
-- 🚧 RDS database integration (in progress)
-- 🚧 Cross-region disaster recovery setup (planned)
+- ✅ RDS database integration
+- ✅ Cross-region disaster recovery setup
+- ✅ GitHub Actions CI/CD pipeline for automated DR
 
 ---
 
@@ -23,11 +24,11 @@ A PHP visit counter application deployed on **Amazon ECS Fargate** using **AWS C
 - **SSM Parameter Store**: Securely stores database credentials
 - **CloudWatch**: Monitors application and infrastructure metrics
 
-### 🆘 Disaster Recovery (DR) Region (Planned)
+### 🆘 Disaster Recovery (DR) Region
 
 - **ECS (Pilot Light)**: Service deployed with `count: 0` (activated during DR)
 - **RDS Read Replica**: Cross-region replica of primary database
-- **Lambda Function**: Automates DR failover process
+- **GitHub Actions**: Automates DR failover process
 - **CloudWatch Alarms**: Triggers DR automation on primary region failure
 - **SNS**: Notification system for DR events
 
@@ -91,60 +92,70 @@ environments:
 
 ---
 
+## 🔄 CI/CD Pipeline for Disaster Recovery
+
+This project includes GitHub Actions workflows that automate both deployment and disaster recovery:
+
+### 1. Continuous Monitoring Workflow
+
+The `monitor-and-dr.yml` workflow runs every 15 minutes to check application health:
+
+- **Trigger**: Scheduled every 15 minutes or manual dispatch
+- **Monitoring**: Checks ECS service CPU utilization in Ireland (eu-west-1)
+- **Failure Detection**: Identifies when CPU utilization drops to 0 or service is inactive
+- **Automatic Recovery**: Triggers DR process when failure is detected
+
+### 2. Deployment and DR Workflow
+
+The `deploy-and-dr.yml` workflow handles code deployments and DR activation:
+
+- **Trigger**: Push to main branch or manual dispatch
+- **Health Check**: Verifies Ireland region service health
+- **DR Activation**: Automatically or manually triggered with `force_dr` parameter
+
+### 3. DR Process Flow
+
+When disaster recovery is triggered, the pipeline:
+
+1. **Promotes RDS Read Replica** in Frankfurt to standalone database
+2. **Updates Parameter Store** with new database endpoint
+3. **Deploys Application** to Frankfurt ECS cluster with `count: 1`
+4. **Sends Notification** via SNS about DR activation
+
+### 4. Pipeline Architecture
+
+```
+Primary Region (Ireland)         DR Region (Frankfurt)
++-------------------+            +-------------------+
+| ECS Service       |            | ECS Service       |
+| (Active)          |  Failure   | (count: 0)        |
+|                   | --------> |                   |
+| RDS Database      |            | RDS Read Replica  |
+| (Primary)         |            | (Promoted on DR)  |
++-------------------+            +-------------------+
+        ^                                ^
+        |                                |
+        |                                |
++---------------------------------------+
+|           GitHub Actions CI/CD         |
+|  - Monitors CPU utilization           |
+|  - Detects failures                   |
+|  - Automates DR process               |
++---------------------------------------+
+```
+
+---
+
 ## ⚙️ Disaster Recovery Automation
 
 ### DR Trigger Flow
 
-1. **CloudWatch Alarm** detects RDS failure in primary region
-2. **SNS Topic** sends notification to Lambda function in DR region
-3. **Lambda Function** executes DR procedures:
+1. **GitHub Actions** detects ECS CPU utilization of 0 in primary region
+2. **Workflow** executes DR procedures:
    - Promotes RDS read replica to standalone instance
    - Updates Parameter Store with new database endpoint
    - Scales ECS service from `count: 0` to `count: 1`
    - Sends notification of DR activation
-
-### Lambda DR Function (Python)
-
-```python
-import boto3
-import json
-
-def lambda_handler(event, context):
-    rds = boto3.client('rds', region_name='<dr-region>')
-    ssm = boto3.client('ssm', region_name='<dr-region>')
-    ecs = boto3.client('ecs', region_name='<dr-region>')
-
-    # Promote read replica
-    rds.promote_read_replica(DBInstanceIdentifier='<replica-id>')
-
-    # Wait for promotion to complete
-    waiter = rds.get_waiter('db_instance_available')
-    waiter.wait(DBInstanceIdentifier='<replica-id>')
-
-    # Get new endpoint
-    response = rds.describe_db_instances(DBInstanceIdentifier='<replica-id>')
-    new_endpoint = response['DBInstances'][0]['Endpoint']['Address']
-
-    # Update Parameter Store
-    ssm.put_parameter(
-        Name='/copilot/<service-name>/dr/secrets/DB_HOST',
-        Value=new_endpoint,
-        Overwrite=True,
-        Type='String'
-    )
-
-    # Scale ECS service
-    ecs.update_service(
-        cluster='<cluster-name>',
-        service='<service-name>',
-        desiredCount=1
-    )
-
-    return {
-        'statusCode': 200,
-        'body': json.dumps('DR activation completed')
-    }
-```
 
 ---
 
@@ -167,6 +178,9 @@ def lambda_handler(event, context):
 ├── index.php              # PHP visit counter application
 ├── README.md              # Project documentation
 ├── .gitignore            # Git ignore rules
+├── .github/workflows/    # GitHub Actions CI/CD pipelines
+│   ├── deploy-and-dr.yml # Deployment and DR workflow
+│   └── monitor-and-dr.yml # Scheduled monitoring workflow
 └── copilot/              # AWS Copilot configurations (gitignored)
     ├── environments/
     └── <service-name>/
@@ -180,7 +194,7 @@ def lambda_handler(event, context):
 - [ ] **Route 53 Health Checks** for automatic DNS failover
 - [ ] **S3 Cross-Region Replication** for static assets
 - [ ] **CloudWatch Dashboards** for monitoring
-- [ ] **Automated testing** of DR procedures
+- [x] **Automated testing** of DR procedures
 - [ ] **Multi-AZ RDS deployment** for high availability
 - [ ] **Auto Scaling** based on CPU/memory metrics
 
@@ -197,7 +211,7 @@ def lambda_handler(event, context):
    aws rds stop-db-instance --db-instance-identifier <primary-db-id>
    ```
 
-2. **Monitor CloudWatch alarms** and Lambda execution
+2. **Monitor CloudWatch alarms** and GitHub Actions execution
 
 3. **Verify DR activation**:
 
@@ -210,8 +224,8 @@ def lambda_handler(event, context):
 
 ### Automated Testing
 
-- Set up CloudWatch synthetic canaries
-- Create automated DR drills using AWS Systems Manager
+- Use GitHub Actions workflow with `force_dr: true` parameter
+- Schedule regular DR drills using the monitoring workflow
 - Implement RTO/RPO monitoring and alerting
 
 ---
@@ -219,9 +233,9 @@ def lambda_handler(event, context):
 ## 📊 Monitoring and Observability
 
 - **CloudWatch Metrics**: ECS task health, RDS performance
-- **CloudWatch Logs**: Application logs and Lambda execution logs
+- **CloudWatch Logs**: Application logs and workflow execution logs
 - **CloudWatch Alarms**: Database connectivity, high latency, error rates
-- **AWS X-Ray**: Distributed tracing (optional)
+- **GitHub Actions Logs**: DR activation and execution details
 
 ---
 

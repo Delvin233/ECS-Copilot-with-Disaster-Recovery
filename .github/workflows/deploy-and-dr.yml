@@ -1,0 +1,133 @@
+name: Deploy and Disaster Recovery
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      force_dr:
+        description: 'Force DR deployment'
+        required: false
+        default: 'false'
+
+jobs:
+  check-primary-health:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.force_dr != 'true' }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-west-1 # Ireland
+    
+    steps:
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+      
+      - name: Check ECS Service Health
+        id: health_check
+        run: |
+          # Get the ECS service status
+          SERVICE_STATUS=$(aws ecs describe-services --cluster ecs-lampstack-test-Cluster-CvYWyoM044Jg --services ecs-lampstack-test-ecs-lampstack-servcie-Service-mRP6uVrypUSL --query 'services[0].status' --output text)
+          echo "Service status: $SERVICE_STATUS"
+          
+          # Check CPU utilization
+          CPU_UTIL=$(aws cloudwatch get-metric-statistics \
+            --namespace AWS/ECS \
+            --metric-name CPUUtilization \
+            --dimensions Name=ClusterName,Value=ecs-lampstack-test-Cluster-CvYWyoM044Jg Name=ServiceName,Value=ecs-lampstack-test-ecs-lampstack-servcie-Service-mRP6uVrypUSL \
+            --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --period 300 \
+            --statistics Average \
+            --query 'Datapoints[0].Average' \
+            --output text)
+          
+          echo "CPU Utilization: $CPU_UTIL"
+          
+          # If CPU is 0 or service is not ACTIVE, set failure flag
+          if [ "$CPU_UTIL" = "0.0" ] || [ "$SERVICE_STATUS" != "ACTIVE" ]; then
+            echo "service_failed=true" >> $GITHUB_OUTPUT
+          else
+            echo "service_failed=false" >> $GITHUB_OUTPUT
+          fi
+    
+    outputs:
+      service_failed: ${{ steps.health_check.outputs.service_failed }}
+
+  deploy-dr:
+    runs-on: ubuntu-latest
+    needs: check-primary-health
+    if: ${{ needs.check-primary-health.outputs.service_failed == 'true' || github.event.inputs.force_dr == 'true' }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: eu-central-1 # Frankfurt
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+      
+      - name: Install Copilot CLI
+        run: |
+          curl -Lo copilot https://github.com/aws/copilot-cli/releases/latest/download/copilot-linux
+          chmod +x copilot
+          sudo mv copilot /usr/local/bin/copilot
+      
+      - name: Promote RDS Read Replica
+        run: |
+          # Use the specific read replica identifier
+          REPLICA_ID="ecs-lampstack"
+          
+          echo "Found read replica: $REPLICA_ID"
+          
+          # Promote the read replica to standalone
+          aws rds promote-read-replica --db-instance-identifier $REPLICA_ID
+          
+          echo "Waiting for promotion to complete..."
+          aws rds wait db-instance-available --db-instance-identifier $REPLICA_ID
+          
+          # Get the new endpoint
+          NEW_ENDPOINT=$(aws rds describe-db-instances \
+            --db-instance-identifier $REPLICA_ID \
+            --query 'DBInstances[0].Endpoint.Address' \
+            --output text)
+          
+          echo "New DB endpoint: $NEW_ENDPOINT"
+          
+          # Update Parameter Store with new endpoint
+          aws ssm put-parameter \
+            --name "/copilot/ecs-lampstack-servcie/dr/secrets/DB_HOST" \
+            --value "$NEW_ENDPOINT" \
+            --type "String" \
+            --overwrite
+      
+      - name: Deploy to DR Region (Frankfurt)
+        run: |
+          # Initialize the DR environment if it doesn't exist
+          copilot env init --name dr --region eu-central-1 || true
+          
+          # Deploy with count=1 (active)
+          copilot svc deploy --name ecs-lampstack-servcie --env dr
+          
+          # Ensure the service is running in the DR cluster
+          aws ecs update-service --cluster ecs-lampstack-dr-Cluster-iWyNIySgFjaU --service ecs-lampstack-servcie --desired-count 1
+      
+      - name: Send DR Activation Notification
+        run: |
+          # Create SNS topic if it doesn't exist
+          TOPIC_ARN=$(aws sns create-topic --name ecs-dr-notification --query 'TopicArn' --output text)
+          
+          # Send notification
+          aws sns publish \
+            --topic-arn $TOPIC_ARN \
+            --subject "DR Activation Alert" \
+            --message "Disaster Recovery has been activated. The application is now running in Frankfurt (eu-central-1)."
